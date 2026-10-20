@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TripSplit</title>
+  <style>
+    :root { --bg:#f6f7fb; --card:#fff; --text:#1a1d29; --muted:#6b7080; --accent:#0070e0; --ok:#1a9b55; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, sans-serif; background:var(--bg); color:var(--text); }
+    main { max-width:480px; margin:0 auto; padding:24px 16px; }
+    h1 { margin:0 0 4px; font-size:1.6rem; }
+    .muted { color:var(--muted); margin:0 0 20px; }
+    .summary { background:var(--accent); color:#fff; border-radius:16px; padding:18px; margin-bottom:20px; }
+    .summary strong { font-size:1.8rem; display:block; }
+    .card { background:var(--card); border-radius:14px; padding:16px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+    .row { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+    .name { font-weight:600; }
+    .paid { color:var(--ok); font-weight:600; }
+    .owes { color:var(--muted); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1 id="trip-name">Loading…</h1>
+    <p class="muted" id="trip-total"></p>
+    <div class="summary">
+      <span>Paid so far</span>
+      <strong id="progress">0 / 0</strong>
+    </div>
+    <div id="travelers"></div>
+  </main>
+
+  <script>
+    async function api(path, options) {
+      const res = await fetch(path, options);
+      return res.json();
+    }
+
+    function loadPayPalSdk(clientId, currency) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = `https://www.paypal.com/sdk/js?client-id=${clientId}&currency=${currency}`;
+        s.onload = resolve;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
+    }
+
+    async function render() {
+      const trip = await api("/api/trip");
+      document.getElementById("trip-name").textContent = trip.name;
+      document.getElementById("trip-total").textContent =
+        `Total $${trip.total.toFixed(2)} · $${trip.share} per person`;
+      const paidCount = trip.travelers.filter(t => t.paid).length;
+      document.getElementById("progress").textContent = `${paidCount} / ${trip.travelers.length}`;
+
+      const list = document.getElementById("travelers");
+      list.innerHTML = "";
+      for (const t of trip.travelers) {
+        const card = document.createElement("div");
+        card.className = "card";
+        card.innerHTML = `
+          <div class="row">
+            <span class="name">${t.name}</span>
+            ${t.paid ? '<span class="paid">✓ Paid</span>' : `<span class="owes">Owes $${trip.share}</span>`}
+          </div>
+          <div id="pay-${t.id}"></div>`;
+        list.appendChild(card);
+
+        if (!t.paid) {
+          paypal.Buttons({
+            style: { layout: "horizontal", tagline: false, height: 40 },
+            createOrder: async () => {
+              const data = await api("/api/orders", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ travelerId: t.id }),
+              });
+              if (!data.id) throw new Error(data.error || "Order failed");
+              return data.id;
+            },
+            onApprove: async (data) => {
+              const result = await api(`/api/orders/${data.orderID}/capture`, { method: "POST" });
+              if (result.status === "COMPLETED") render();
+              else alert("Payment not completed: " + (result.error || result.status));
+            },
+            onError: (err) => { console.error(err); alert("Something went wrong with PayPal."); },
+          }).render(`#pay-${t.id}`);
+        }
+      }
+    }
+
+    (async () => {
+      const { clientId, currency } = await api("/api/config");
+      await loadPayPalSdk(clientId, currency);
+      render();
+    })();
+  </script>
+</body>
+</html>
