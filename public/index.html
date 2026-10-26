@@ -5,31 +5,67 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>TripSplit</title>
   <style>
-    :root { --bg:#f6f7fb; --card:#fff; --text:#1a1d29; --muted:#6b7080; --accent:#0070e0; --ok:#1a9b55; }
+    :root { --bg:#f6f7fb; --card:#fff; --text:#1a1d29; --muted:#6b7080; --line:#e3e6ee; --accent:#0070e0; --ok:#1a9b55; --hold:#b26a00; --bad:#c0392b; }
     * { box-sizing: border-box; }
     body { margin:0; font-family: system-ui, -apple-system, sans-serif; background:var(--bg); color:var(--text); }
-    main { max-width:480px; margin:0 auto; padding:24px 16px; }
+    main { max-width:480px; margin:0 auto; padding:24px 16px 48px; }
     h1 { margin:0 0 4px; font-size:1.6rem; }
+    h2 { font-size:1rem; margin:28px 0 10px; }
     .muted { color:var(--muted); margin:0 0 20px; }
-    .summary { background:var(--accent); color:#fff; border-radius:16px; padding:18px; margin-bottom:20px; }
-    .summary strong { font-size:1.8rem; display:block; }
+    .pot { background:var(--accent); color:#fff; border-radius:16px; padding:18px; margin-bottom:16px; }
+    .pot strong { font-size:1.8rem; display:block; font-variant-numeric:tabular-nums; }
+    .pot .bar { height:10px; background:rgba(255,255,255,.3); border-radius:99px; overflow:hidden; margin:12px 0 8px; }
+    .pot .bar i { display:block; height:100%; background:#fff; border-radius:99px; }
+    .pot small { opacity:.9; }
+    .banner { border-radius:12px; padding:12px 14px; margin-bottom:16px; font-weight:600; }
+    .banner.booked { background:#e3f5ea; color:var(--ok); }
+    .banner.cancelled { background:#fbe9e7; color:var(--bad); }
     .card { background:var(--card); border-radius:14px; padding:16px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
-    .row { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+    .row { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:8px; }
     .name { font-weight:600; }
     .paid { color:var(--ok); font-weight:600; }
-    .owes { color:var(--muted); }
+    .held { color:var(--hold); font-weight:600; }
+    .owes, .released, .refunded { color:var(--muted); font-weight:600; }
     .proof { color:var(--muted); font-size:.8rem; font-variant-numeric:tabular-nums; }
+    .org label { display:block; font-size:.85rem; color:var(--muted); margin-bottom:6px; }
+    .org input { width:100%; padding:10px; border:1px solid var(--line); border-radius:10px; font-size:1rem; margin-bottom:10px; }
+    .org button { width:100%; padding:12px; border:0; border-radius:10px; font-size:1rem; font-weight:600; cursor:pointer; margin-bottom:8px; }
+    .org .go { background:var(--accent); color:#fff; }
+    .org .stop { background:transparent; color:var(--bad); border:1px solid var(--bad); }
+    .org button:disabled { opacity:.45; cursor:not-allowed; }
+    .note { font-size:.85rem; color:var(--muted); min-height:1.2em; }
+    .trail { list-style:none; padding:0; margin:0; }
+    .trail li { padding:10px 0; border-bottom:1px solid var(--line); font-size:.88rem; }
+    .trail .t { color:var(--muted); font-size:.78rem; font-variant-numeric:tabular-nums; }
   </style>
 </head>
 <body>
   <main>
     <h1 id="trip-name">Loading…</h1>
     <p class="muted" id="trip-total"></p>
-    <div class="summary">
-      <span>Paid so far</span>
-      <strong id="progress">0 / 0</strong>
+
+    <div id="banner"></div>
+
+    <div class="pot">
+      <span>Trip pot</span>
+      <strong id="pot-amount">$0 of $0</strong>
+      <div class="bar"><i id="pot-bar" style="width:0%"></i></div>
+      <small id="pot-note"></small>
     </div>
+
     <div id="travelers"></div>
+
+    <h2>Organizer</h2>
+    <div class="card org">
+      <label for="pin">Organizer PIN</label>
+      <input id="pin" type="password" autocomplete="off" placeholder="PIN from your .env file" />
+      <button class="go" id="collect">Collect everyone &amp; book</button>
+      <button class="stop" id="cancel">Cancel trip (release holds, refund payments)</button>
+      <div class="note" id="org-note"></div>
+    </div>
+
+    <h2>Money trail</h2>
+    <ul class="trail" id="trail"><li class="t">No money has moved yet.</li></ul>
   </main>
 
   <script>
@@ -37,71 +73,121 @@
       const res = await fetch(path, options);
       return res.json();
     }
+    function post(path, body) {
+      return api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    }
 
     // SECURITY: turn special characters like angle brackets into plain text, so a
     // name containing HTML or code shows as words instead of running (prevents XSS).
     function esc(s) {
       return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
     }
+    const money = (v) => "$" + Number(v).toFixed(2);
+    const when = (iso) => (iso ? new Date(iso).toLocaleString() : "");
 
-    function loadPayPalSdk(clientId, currency) {
+    function loadPayPalSdk(clientId, currency, intent) {
       return new Promise((resolve, reject) => {
         const s = document.createElement("script");
-        s.src = `https://www.paypal.com/sdk/js?client-id=${clientId}&currency=${currency}`;
+        s.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(clientId)}&currency=${currency}&intent=${intent}`;
         s.onload = resolve;
         s.onerror = reject;
         document.head.appendChild(s);
       });
     }
 
+    function statusLine(t, share) {
+      if (t.status === "paid") return `<span class="paid">✓ Paid</span>`;
+      if (t.status === "held") return `<span class="held">Held · not charged yet</span>`;
+      if (t.status === "released") return `<span class="released">Released · never charged</span>`;
+      if (t.status === "refunded") return `<span class="refunded">Refunded</span>`;
+      return `<span class="owes">Owes ${money(share)}</span>`;
+    }
+    function proofLine(t) {
+      if (t.status === "paid") return `PayPal ID ${esc(t.transactionId)} · ${esc(when(t.paidAt))}`;
+      if (t.status === "held") return `Hold ID ${esc(t.authorizationId)}` + (t.holdExpires ? ` · expires ${esc(when(t.holdExpires))}` : "");
+      if (t.status === "refunded") return `Refund ID ${esc(t.refundId)}`;
+      return "";
+    }
+
     async function render() {
       const trip = await api("/api/trip");
       document.getElementById("trip-name").textContent = trip.name; // textContent is already safe
-      document.getElementById("trip-total").textContent =
-        `Total $${trip.total.toFixed(2)} · $${trip.share} per person`;
-      const paidCount = trip.travelers.filter(t => t.paid).length;
-      document.getElementById("progress").textContent = `${paidCount} / ${trip.travelers.length}`;
+      document.getElementById("trip-total").textContent = `Total ${money(trip.total)} · ${money(trip.share)} per person`;
+
+      const pct = Math.round((Number(trip.potCommitted) / trip.total) * 100);
+      document.getElementById("pot-amount").textContent = `${money(trip.potCommitted)} of ${money(trip.total)}`;
+      document.getElementById("pot-bar").style.width = pct + "%";
+      document.getElementById("pot-note").textContent =
+        trip.status === "collecting"
+          ? `${trip.committedCount} of ${trip.travelers.length} committed · nobody is charged until everyone is in`
+          : trip.status === "booked" ? "Everyone paid · trip booked" : "Trip cancelled · holds released, payments refunded";
+
+      const banner = document.getElementById("banner");
+      banner.className = trip.status === "collecting" ? "" : "banner " + trip.status;
+      banner.textContent =
+        trip.status === "booked" ? "Pot full. Everyone was charged at the same time and the trip is booked."
+        : trip.status === "cancelled" ? "Trip cancelled. Nobody lost money." : "";
 
       const list = document.getElementById("travelers");
       list.innerHTML = "";
       for (const t of trip.travelers) {
         const card = document.createElement("div");
         card.className = "card";
+        const proof = proofLine(t);
         card.innerHTML = `
           <div class="row">
             <span class="name">${esc(t.name)}</span>
-            ${t.paid ? '<span class="paid">✓ Paid</span>' : `<span class="owes">Owes $${esc(trip.share)}</span>`}
+            ${statusLine(t, trip.share)}
           </div>
-          ${t.paid && t.transactionId ? `<div class="proof">PayPal ID ${esc(t.transactionId)} · ${esc(new Date(t.paidAt).toLocaleString())}</div>` : ""}
+          ${proof ? `<div class="proof">${proof}</div>` : ""}
           <div id="pay-${esc(t.id)}"></div>`;
         list.appendChild(card);
 
-        if (!t.paid) {
+        if (t.status === "owes" && trip.status === "collecting") {
           paypal.Buttons({
             style: { layout: "horizontal", tagline: false, height: 40 },
             createOrder: async () => {
-              const data = await api("/api/orders", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ travelerId: t.id }),
-              });
+              const data = await post("/api/orders", { travelerId: t.id });
               if (!data.id) throw new Error(data.error || "Order failed");
               return data.id;
             },
             onApprove: async (data) => {
-              const result = await api(`/api/orders/${data.orderID}/capture`, { method: "POST" });
-              if (result.status === "COMPLETED") render();
-              else alert("Payment not completed: " + (result.error || result.status));
+              const result = await post(`/api/orders/${encodeURIComponent(data.orderID)}/authorize`);
+              if (result.status === "HELD") render();
+              else document.getElementById("org-note").textContent = "Payment not completed: " + (result.error || result.status);
             },
-            onError: (err) => { console.error(err); alert("Something went wrong with PayPal."); },
+            onError: (err) => { console.error(err); document.getElementById("org-note").textContent = "Something went wrong with PayPal."; },
           }).render(`#pay-${t.id}`);
         }
       }
+
+      const allHeld = trip.travelers.every((t) => t.status === "held");
+      document.getElementById("collect").disabled = !trip.organizerEnabled || trip.status !== "collecting" || !allHeld;
+      document.getElementById("cancel").disabled = !trip.organizerEnabled || trip.status === "cancelled";
+      if (!trip.organizerEnabled) document.getElementById("org-note").textContent = "Add ORGANIZER_PIN to your .env file to turn these on.";
+
+      const trail = document.getElementById("trail");
+      trail.innerHTML = trip.trail.length
+        ? trip.trail.map((e) => `<li><div>${esc(e.who)} · ${esc(e.action)} · ${esc(money(e.amount))}</div><div class="t">${esc(when(e.time))}${e.paypalId ? " · " + esc(e.paypalId) : ""}</div></li>`).join("")
+        : `<li class="t">No money has moved yet.</li>`;
     }
 
+    async function organizer(action) {
+      if (action === "cancel" && !confirm("Cancel the trip? Holds are released and payments are refunded.")) return;
+      const note = document.getElementById("org-note");
+      note.textContent = action === "collect" ? "Collecting everyone…" : "Cancelling…";
+      const result = await post(`/api/organizer/${action}`, { pin: document.getElementById("pin").value });
+      note.textContent = result.error
+        ? result.error
+        : result.problems && result.problems.length ? "Some steps failed: " + result.problems.join(", ") : "Done.";
+      render();
+    }
+    document.getElementById("collect").addEventListener("click", () => organizer("collect"));
+    document.getElementById("cancel").addEventListener("click", () => organizer("cancel"));
+
     (async () => {
-      const { clientId, currency } = await api("/api/config");
-      await loadPayPalSdk(clientId, currency);
+      const { clientId, currency, intent } = await api("/api/config");
+      await loadPayPalSdk(clientId, currency, intent);
       render();
     })();
   </script>
