@@ -18,6 +18,7 @@
     .name { font-weight:600; }
     .paid { color:var(--ok); font-weight:600; }
     .owes { color:var(--muted); }
+    .proof { color:var(--muted); font-size:.8rem; font-variant-numeric:tabular-nums; }
   </style>
 </head>
 <body>
@@ -37,6 +38,12 @@
       return res.json();
     }
 
+    // SECURITY: turn special characters like angle brackets into plain text, so a
+    // name containing HTML or code shows as words instead of running (prevents XSS).
+    function esc(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
     function loadPayPalSdk(clientId, currency) {
       return new Promise((resolve, reject) => {
         const s = document.createElement("script");
@@ -49,7 +56,7 @@
 
     async function render() {
       const trip = await api("/api/trip");
-      document.getElementById("trip-name").textContent = trip.name;
+      document.getElementById("trip-name").textContent = trip.name; // textContent is already safe
       document.getElementById("trip-total").textContent =
         `Total $${trip.total.toFixed(2)} · $${trip.share} per person`;
       const paidCount = trip.travelers.filter(t => t.paid).length;
@@ -62,10 +69,11 @@
         card.className = "card";
         card.innerHTML = `
           <div class="row">
-            <span class="name">${t.name}</span>
-            ${t.paid ? '<span class="paid">✓ Paid</span>' : `<span class="owes">Owes $${trip.share}</span>`}
+            <span class="name">${esc(t.name)}</span>
+            ${t.paid ? '<span class="paid">✓ Paid</span>' : `<span class="owes">Owes $${esc(trip.share)}</span>`}
           </div>
-          <div id="pay-${t.id}"></div>`;
+          ${t.paid && t.transactionId ? `<div class="proof">PayPal ID ${esc(t.transactionId)} · ${esc(new Date(t.paidAt).toLocaleString())}</div>` : ""}
+          <div id="pay-${esc(t.id)}"></div>`;
         list.appendChild(card);
 
         if (!t.paid) {
