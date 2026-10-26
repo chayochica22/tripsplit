@@ -52,10 +52,16 @@ const toDollars = (cents) => (cents / 100).toFixed(2);
 // ---------------------------------------------------------------
 const newToken = () => crypto.randomBytes(16).toString("hex");
 
+// Dates are kept as "YYYY-MM-DD" text. A deadline means "pay by the END of that day".
+const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const daysFromNow = (n) => isoDate(new Date(Date.now() + n * 864e5));
+const endOfDay = (iso) => new Date(`${iso}T23:59:59`);
+
 const trip = {
   name: "Madrid + Lisbon Getaway",
   currency: "USD",
   status: "collecting",
+  deadline: daysFromNow(14), // "Pay by" date for every share
   planSource: "sample", // "sample" until AI makes a plan
   sharedCosts: [
     { item: "Apartment, 14 nights", totalCents: 240000 },
@@ -91,6 +97,9 @@ function shareCents(t) {
   const activities = Object.values(t.joins).reduce((sum, c) => sum + c, 0);
   return sharedPartCents(t) + activities;
 }
+
+// Late = hasn't committed and the "pay by" day is over.
+const isLate = (t) => t.status === "owes" && trip.status === "collecting" && Boolean(trip.deadline) && Date.now() > endOfDay(trip.deadline).getTime();
 
 // Money trail: every dollar in and out, newest first, with PayPal IDs.
 const trail = [];
@@ -131,6 +140,7 @@ function publicTrip(me) {
     status: t.status,
     sharedPart: toDollars(sharedPartCents(t)),
     share: toDollars(shareCents(t)),
+    late: isLate(t),
     joins: Object.keys(t.joins),
     reapprove: t.reapprove,
     authorizationId: t.authorizationId,
@@ -152,6 +162,10 @@ function publicTrip(me) {
     potTotal: toDollars(trip.travelers.reduce((sum, t) => sum + shareCents(t), 0)),
     potCommitted: toDollars(committed.reduce((sum, t) => sum + (t.heldCents || 0), 0)),
     committedCount: committed.length,
+    deadline: trip.deadline,
+    lateCount: trip.travelers.filter(isLate).length,
+    // PayPal holds expire (about 29 days). Warn the organizer before the first one does.
+    firstHoldExpires: trip.travelers.filter((t) => t.status === "held" && t.holdExpires).map((t) => t.holdExpires).sort()[0] || null,
     me: me ? me.id : null,
     aiEnabled: Boolean(ANTHROPIC_API_KEY),
     organizerEnabled: Boolean(ORGANIZER_PIN),
@@ -338,6 +352,44 @@ app.post("/api/organizer/view", (req, res) => {
   });
 });
 
+// Create a new trip: its name, the friends, and the "pay by" date.
+// Allowed when nobody's money is on hold, so nobody's money gets mixed up.
+app.post("/api/organizer/setup", (req, res) => {
+  if (!isOrganizer(req)) return res.status(403).json({ error: "Wrong organizer PIN" });
+  if (trip.status === "collecting" && trip.travelers.some((t) => t.status !== "owes")) {
+    return res.status(400).json({ error: "Someone's money is on hold. Collect or cancel this trip first." });
+  }
+
+  const name = cleanText(req.body.tripName, 60);
+  if (!name) return res.status(400).json({ error: "Give the trip a name" });
+
+  const names = String(req.body.names || "")
+    .split(/[\n,]/)
+    .map((n) => cleanText(n, 30))
+    .filter(Boolean);
+  const unique = new Set(names.map((n) => n.toLowerCase()));
+  if (names.length < 2 || names.length > 12) return res.status(400).json({ error: "Add between 2 and 12 friends, one per line" });
+  if (unique.size !== names.length) return res.status(400).json({ error: "Each friend needs a different name" });
+
+  const deadline = String(req.body.deadline || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(deadline) || Number.isNaN(endOfDay(deadline).getTime())) {
+    return res.status(400).json({ error: "Pick a pay-by date" });
+  }
+  if (endOfDay(deadline) < new Date()) return res.status(400).json({ error: "The pay-by date is already over. Pick a later date." });
+  if (endOfDay(deadline) > new Date(Date.now() + 60 * 864e5)) return res.status(400).json({ error: "Pick a pay-by date within 60 days" });
+
+  trip.name = name;
+  trip.deadline = deadline;
+  trip.status = "collecting";
+  trip.travelers = names.map((n, i) => ({ id: `t${i + 1}`, name: n, token: newToken(), status: "owes", joins: {}, reapprove: [] }));
+  createdOrders.clear();
+  trail.length = 0;
+  logEvent("Organizer", `New trip for ${names.length} friends, pay by ${deadline}`, null, "");
+  console.log("New invite links:");
+  for (const t of trip.travelers) console.log(`  ${t.name}: http://localhost:${PORT}/?t=${t.token}`);
+  res.json({ ok: true });
+});
+
 // AI plans the trip. Only before anyone has committed money.
 app.post("/api/organizer/plan", async (req, res) => {
   if (!isOrganizer(req)) return res.status(403).json({ error: "Wrong organizer PIN" });
@@ -426,6 +478,8 @@ app.post("/api/organizer/nudges", async (req, res) => {
     shareUSD: toDollars(shareCents(t)),
     joined: trip.activities.filter((a) => a.id in t.joins).map((a) => a.name),
     needsToReapprove: trip.activities.filter((a) => t.reapprove.includes(a.id)).map((a) => a.name),
+    payBy: trip.deadline,
+    late: isLate(t),
   }));
   const system = [
     "You write short, friendly payment reminders for TripSplit, a group trip app.",
@@ -433,6 +487,7 @@ app.post("/api/organizer/nudges", async (req, res) => {
     "Use at most one emoji, and only one of these: \u{1F642} ✈️ \u{1F30D} \u{1F389}. Never an eye-roll or sweating face.",
     "Mention the person's share and that nobody is charged until everyone is in.",
     "If needsToReapprove is not empty, mention that a price changed and they should confirm it.",
+    "Mention the pay-by date (payBy, written like \"Nov 20\"). If late is true, kindly say the date has passed and ask them to jump in soon so the group can book.",
     'Reply with ONLY JSON: {"nudges": [{"name": string, "message": string}]}. Each message under 240 characters.',
   ].join("\n");
   try {

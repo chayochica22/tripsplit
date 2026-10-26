@@ -32,6 +32,13 @@
     .paid { color:var(--ok); font-weight:600; }
     .held { color:var(--hold); font-weight:600; }
     .owes, .released, .refunded { color:var(--muted); font-weight:600; }
+    .late { color:var(--bad); font-weight:600; }
+    .summary { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+    .summary span { font-size:.85rem; font-weight:600; padding:4px 10px; border-radius:99px; background:var(--card); box-shadow:0 1px 3px rgba(0,0,0,.06); }
+    .summary .bad { color:var(--bad); }
+    details.card summary { cursor:pointer; font-weight:600; }
+    details.card[open] summary { margin-bottom:12px; }
+    .field { margin-bottom:12px; }
     .proof { color:var(--muted); font-size:.8rem; font-variant-numeric:tabular-nums; margin-top:6px; }
     .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
     .chip { font-size:.78rem; padding:2px 8px; border-radius:99px; background:var(--bg); color:var(--muted); }
@@ -80,6 +87,8 @@
     }
     const money = (v) => "$" + Number(v).toFixed(2);
     const when = (iso) => (iso ? new Date(iso).toLocaleString() : "");
+    // "2026-11-20" -> "Nov 20" (read at noon so time zones never shift the day)
+    const day = (iso) => (iso ? new Date(iso + "T12:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "");
     async function getJson(url) { const r = await fetch(url); return r.json(); }
     async function post(url, body) {
       const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
@@ -103,6 +112,7 @@
       if (t.status === "held") return `<span class="held">Held · not charged yet</span>`;
       if (t.status === "released") return `<span class="released">Released · never charged</span>`;
       if (t.status === "refunded") return `<span class="refunded">Refunded</span>`;
+      if (t.late) return `<span class="late">Late · owes ${money(t.share)}</span>`;
       return `<span class="owes">Owes ${money(t.share)}</span>`;
     }
     function proofLine(t) {
@@ -117,7 +127,7 @@
         : trip.status === "cancelled" ? `<div class="banner cancelled">Trip cancelled. Nobody lost money.</div>` : "";
       const pct = Number(trip.potTotal) > 0 ? Math.round((Number(trip.potCommitted) / Number(trip.potTotal)) * 100) : 0;
       const potNote =
-        trip.status === "collecting" ? `${trip.committedCount} of ${trip.travelers.length} committed · nobody is charged until everyone is in`
+        trip.status === "collecting" ? `${trip.committedCount} of ${trip.travelers.length} committed · pay by ${day(trip.deadline)} · nobody is charged until everyone is in`
         : trip.status === "booked" ? "Everyone paid · trip booked" : "Trip cancelled · holds released, payments refunded";
       return `
         <h1>${esc(trip.name)}</h1>
@@ -207,8 +217,9 @@
           ${breakdown}
           ${proof ? `<div class="proof">${proof}</div>` : ""}
           ${me.reapprove.length ? `<div class="banner warn">A price changed. Confirm or skip it before paying.</div>` : ""}
+          ${me.late ? `<div class="banner cancelled">The pay-by date (${esc(day(trip.deadline))}) has passed. The group is waiting on you to book.</div>` : ""}
           <div id="pay-box"></div>
-          <div class="status" id="pay-status">${canChoose ? "Paying places a hold. You're only charged when everyone is in." : ""}</div>
+          <div class="status" id="pay-status">${canChoose ? `Pay by ${esc(day(trip.deadline))}. Paying places a hold. You're only charged when everyone is in.` : ""}</div>
         </div>
         <h2>Plans ${planTag(trip)}</h2>
         ${sharedCostsHtml(trip)}
@@ -269,7 +280,8 @@
       if (!PIN) return;
       // Don't auto-refresh while the organizer is typing (it would wipe what they typed).
       const typing = document.activeElement && ["INPUT", "TEXTAREA"].includes(document.activeElement.tagName);
-      if (!force && typing) return;
+      const settingUp = document.getElementById("setup")?.open;
+      if (!force && (typing || settingUp)) return;
       // Keep any price someone typed but hasn't saved yet.
       const priceDrafts = {};
       document.querySelectorAll("[id^='price-']").forEach((el) => { if (el.dataset.dirty) priceDrafts[el.id] = el.value; });
@@ -280,9 +292,34 @@
       lastJson = json;
       // keep what the organizer is typing
       const draft = document.getElementById("plan-request")?.value || "";
+      const setupOpen = document.getElementById("setup")?.open || false;
 
       const someoneCommitted = trip.travelers.some((t) => t.status !== "owes");
       const allHeld = trip.travelers.every((t) => t.status === "held");
+      const moneyOnHold = trip.status === "collecting" && someoneCommitted;
+      const paid = trip.travelers.filter((t) => t.status === "paid").length;
+      const held = trip.travelers.filter((t) => t.status === "held").length;
+      const waiting = trip.travelers.filter((t) => t.status === "owes").length;
+      const summary = `
+        <div class="summary">
+          <span>${paid} paid</span>
+          <span>${held} held</span>
+          <span>${waiting} waiting</span>
+          ${trip.lateCount ? `<span class="bad">${trip.lateCount} late</span>` : ""}
+        </div>
+        ${trip.firstHoldExpires ? `<div class="note">First PayPal hold expires ${esc(when(trip.firstHoldExpires))}. Collect before then.</div>` : ""}`;
+      const setup = `
+        <details class="card" id="setup" ${setupOpen ? "open" : ""}>
+          <summary>Trip setup: name, friends, pay-by date</summary>
+          <div class="field"><label for="setup-name">Trip name</label>
+            <input id="setup-name" value="${esc(trip.name)}" maxlength="60" /></div>
+          <div class="field"><label for="setup-names">Friends, one per line (2 to 12)</label>
+            <textarea id="setup-names">${esc(trip.travelers.map((t) => t.name).join("\n"))}</textarea></div>
+          <div class="field"><label for="setup-deadline">Pay by</label>
+            <input id="setup-deadline" type="date" value="${esc(trip.deadline || "")}" /></div>
+          <button class="primary wide" id="setup-save" ${moneyOnHold ? "disabled" : ""}>Start new trip</button>
+          <div class="status" id="setup-status">${moneyOnHold ? "Someone's money is on hold. Collect or cancel this trip first." : "Starting a new trip makes new invite links and clears choices."}</div>
+        </details>`;
 
       const activities = trip.activities.map((a) => {
         const chips = trip.travelers.map((t) => {
@@ -312,6 +349,8 @@
 
       document.getElementById("app").innerHTML = `
         ${headerHtml(trip, "Organizer view")}
+        ${summary}
+        ${setup}
 
         <h2>Plan the trip with AI</h2>
         <div class="card">
@@ -349,6 +388,20 @@
         <h2>Money trail</h2>
         ${trailHtml(trip)}`;
 
+      document.getElementById("setup-save").addEventListener("click", async () => {
+        if (!confirm("Start a new trip? Everyone gets new invite links and choices are cleared.")) return;
+        setStatus("setup-status", "Creating the trip…");
+        const r = await post("/api/organizer/setup", {
+          pin: PIN,
+          tripName: document.getElementById("setup-name").value,
+          names: document.getElementById("setup-names").value,
+          deadline: document.getElementById("setup-deadline").value,
+        });
+        if (r.error) { setStatus("setup-status", r.error); return; }
+        nudges = [];
+        await renderOrganizer(true);
+        setStatus("plan-status", "Trip created. Now plan it with AI, then send each friend their invite link.");
+      });
       document.getElementById("plan").addEventListener("click", async () => {
         const request = document.getElementById("plan-request").value;
         setStatus("plan-status", "Planning… this takes a few seconds.");
