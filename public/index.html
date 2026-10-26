@@ -33,6 +33,14 @@
     .held { color:var(--hold); font-weight:600; }
     .owes, .released, .refunded { color:var(--muted); font-weight:600; }
     .late { color:var(--bad); font-weight:600; }
+    .tag.yours { background:#e3f5ea; color:var(--ok); }
+    .tag.est { background:var(--bg); color:var(--muted); }
+    h3 { font-size:.85rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:18px 0 8px; }
+    .meta { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:6px; font-size:.85rem; }
+    .meta a { color:var(--accent); font-weight:600; }
+    .remove { padding:4px 10px; font-size:.8rem; color:var(--bad); background:transparent; border:1px solid var(--line); }
+    select { font:inherit; width:100%; padding:10px; border:1px solid var(--line); border-radius:10px; background:#fff; color:var(--text); }
+    .two { display:flex; gap:8px; } .two > * { flex:1; min-width:0; }
     .summary { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
     .summary span { font-size:.85rem; font-weight:600; padding:4px 10px; border-radius:99px; background:var(--card); box-shadow:0 1px 3px rgba(0,0,0,.06); }
     .summary .bad { color:var(--bad); }
@@ -140,14 +148,32 @@
           <small>${esc(potNote)}</small>
         </div>`;
     }
-    function sharedCostsHtml(trip) {
-      const rows = trip.sharedCosts.map((c) => `<tr><td>${esc(c.item)}</td><td>${money(c.total)}</td></tr>`).join("");
+    // "Your price" = a real price the organizer found. "AI estimate" = a guess.
+    function sourceTag(x) {
+      return x.source === "user" ? `<span class="tag yours">Your price</span>` : `<span class="tag est">AI estimate</span>`;
+    }
+    function linkHtml(x) {
+      return x.link ? `<a href="${esc(x.link)}" target="_blank" rel="noopener noreferrer">View</a>` : "";
+    }
+    function sharedCostsHtml(trip, canRemove) {
+      const rows = trip.sharedCosts.map((c) => `
+        <tr><td>${esc(c.item)}<div class="meta">${sourceTag(c)} ${linkHtml(c)}
+          ${canRemove ? `<button class="remove" data-remove="${esc(c.id)}">Remove</button>` : ""}</div></td>
+        <td>${money(c.total)}</td></tr>`).join("");
       return `
+        <h3>Shared costs (stays, group transport)</h3>
         <div class="card">
-          <div class="name">Shared costs</div>
           <div class="note">Split evenly: about ${money(trip.sharedPart)} per person</div>
           <table class="breakdown">${rows}</table>
         </div>`;
+    }
+    // Optional items grouped: flights, places to eat, activities.
+    const GROUPS = [["flight", "Flights (book together, or skip if you fly on your own)"], ["food", "Places to eat"], ["activity", "Activities"]];
+    function groupedOptions(trip, card) {
+      return GROUPS.map(([kind, title]) => {
+        const items = trip.activities.filter((a) => (a.kind || "activity") === kind);
+        return items.length ? `<h3>${title}</h3>` + items.map(card).join("") : "";
+      }).join("");
     }
     function groupHtml(trip) {
       return trip.travelers.map((t) => {
@@ -184,14 +210,15 @@
       }
       const canChoose = trip.status === "collecting" && me.status === "owes";
 
-      const activities = trip.activities.map((a) => {
+      const activities = groupedOptions(trip, (a) => {
         const inIt = me.joins.includes(a.id);
         const re = me.reapprove.includes(a.id);
         const who = trip.travelers.filter((t) => t.joins.includes(a.id)).map((t) => esc(t.name)).join(", ");
         return `
           <div class="card">
             <div class="row"><span class="name">${esc(a.name)}</span><span class="price">${money(a.price)} each</span></div>
-            <div class="note">${esc(a.day)} · ${esc(a.note)}</div>
+            <div class="note">${esc([a.day, a.note].filter(Boolean).join(" · "))}</div>
+            <div class="meta">${sourceTag(a)} ${linkHtml(a)}</div>
             ${re ? `<div class="chips"><span class="chip re">Price changed. Tap I'm in to accept ${money(a.price)}, or Skip.</span></div>` : ""}
             <div class="note">Going: ${who || "nobody yet"}</div>
             ${canChoose ? `<div class="btns">
@@ -199,7 +226,7 @@
               <button class="ghost" data-join="${esc(a.id)}" data-val="0">Skip</button>
             </div>` : ""}
           </div>`;
-      }).join("");
+      });
 
       const joined = trip.activities.filter((a) => me.joins.includes(a.id));
       const breakdown = `
@@ -280,7 +307,8 @@
       if (!PIN) return;
       // Don't auto-refresh while the organizer is typing (it would wipe what they typed).
       const typing = document.activeElement && ["INPUT", "TEXTAREA"].includes(document.activeElement.tagName);
-      const settingUp = document.getElementById("setup")?.open;
+      const settingUp = document.getElementById("setup")?.open
+        || ["add-name", "add-price", "add-link"].some((id) => document.getElementById(id)?.value);
       if (!force && (typing || settingUp)) return;
       // Keep any price someone typed but hasn't saved yet.
       const priceDrafts = {};
@@ -321,7 +349,7 @@
           <div class="status" id="setup-status">${moneyOnHold ? "Someone's money is on hold. Collect or cancel this trip first." : "Starting a new trip makes new invite links and clears choices."}</div>
         </details>`;
 
-      const activities = trip.activities.map((a) => {
+      const activities = groupedOptions(trip, (a) => {
         const chips = trip.travelers.map((t) => {
           const cls = t.joins.includes(a.id) ? "in" : t.reapprove.includes(a.id) ? "re" : "";
           const label = t.joins.includes(a.id) ? "in" : t.reapprove.includes(a.id) ? "must re-approve" : "not yet";
@@ -330,14 +358,45 @@
         return `
           <div class="card">
             <div class="row"><span class="name">${esc(a.name)}</span><span class="price">${money(a.price)} each</span></div>
-            <div class="note">${esc(a.day)} · ${esc(a.note)}</div>
+            <div class="note">${esc([a.day, a.note].filter(Boolean).join(" · "))}</div>
+            <div class="meta">${sourceTag(a)} ${linkHtml(a)}
+              ${trip.status === "collecting" ? `<button class="remove" data-remove="${esc(a.id)}">Remove</button>` : ""}</div>
             <div class="chips">${chips}</div>
             ${trip.status === "collecting" ? `<div class="price-edit">
               <input type="number" min="0" step="0.01" value="${esc(a.price)}" id="price-${esc(a.id)}" aria-label="New price for ${esc(a.name)}" />
               <button class="ghost" data-price="${esc(a.id)}">Update price</button>
             </div>` : ""}
           </div>`;
-      }).join("");
+      });
+
+      const addForm = trip.status !== "collecting" ? "" : `
+        <h3>Add something you found</h3>
+        <div class="card">
+          <div class="note" style="margin:0 0 10px">Found a flight, hotel, or restaurant? Add it with its exact price.</div>
+          <div class="field"><label for="add-kind">What is it?</label>
+            <select id="add-kind">
+              <option value="flight">Flight</option>
+              <option value="hotel">Hotel or stay</option>
+              <option value="food">Place to eat</option>
+              <option value="activity">Activity</option>
+            </select></div>
+          <div class="field"><label for="add-name">Name</label>
+            <input id="add-name" maxlength="60" placeholder="Iberia AUS to MAD, Dec 25" /></div>
+          <div class="two field">
+            <div><label for="add-price">Price ($)</label><input id="add-price" type="number" min="0" step="0.01" /></div>
+            <div><label for="add-type">How it's paid</label>
+              <select id="add-type">
+                <option value="each">Per person (friends opt in)</option>
+                <option value="split">Total, split by everyone</option>
+              </select></div>
+          </div>
+          <div class="two field">
+            <div><label for="add-day">Date (optional)</label><input id="add-day" maxlength="20" placeholder="Dec 25" /></div>
+            <div><label for="add-link">Link (optional)</label><input id="add-link" maxlength="300" placeholder="https://" /></div>
+          </div>
+          <button class="primary wide" id="add-save">Add to the plan</button>
+          <div class="status" id="add-status"></div>
+        </div>`;
 
       const invites = trip.invites.map((i) => `
         <div class="row"><span class="name">${esc(i.name)}</span><a href="${esc(i.url)}" target="_blank" rel="noopener">Open as ${esc(i.name)}</a></div>
@@ -355,15 +414,16 @@
         <h2>Plan the trip with AI</h2>
         <div class="card">
           <label for="plan-request">Describe the trip</label>
-          <textarea id="plan-request" placeholder="3 friends, Madrid then Lisbon, Dec 25 to Jan 8, mid budget, love food and music">${esc(draft)}</textarea>
+          <textarea id="plan-request" maxlength="2000" placeholder="Madrid then Lisbon, Dec 25 to Jan 8, mid budget, we love food and music. Flight we found: Iberia Austin to Madrid, $780 per person. Hotel we found: Hotel Ritz Lisbon, $240 a night for 7 nights.">${esc(draft)}</textarea>
           <button class="primary wide" id="plan" ${!trip.aiEnabled || someoneCommitted || trip.status !== "collecting" ? "disabled" : ""}>Plan with AI</button>
-          <div class="status" id="plan-status">${!trip.aiEnabled ? "Add ANTHROPIC_API_KEY to your .env file to turn on AI." : someoneCommitted ? "Someone already committed money, so the plan is locked." : "AI suggests shared costs and activities with prices per person."}</div>
+          <div class="status" id="plan-status">${!trip.aiEnabled ? "Add ANTHROPIC_API_KEY to your .env file to turn on AI." : someoneCommitted ? "Someone already committed money, so the plan is locked." : "Paste flights or hotels you found with their prices, and AI uses your exact prices. It also suggests places to eat and activities."}</div>
         </div>
 
         <h2>Plans ${planTag(trip)}</h2>
-        ${sharedCostsHtml(trip)}
+        ${sharedCostsHtml(trip, !someoneCommitted)}
         ${activities}
         <div class="status" id="price-status"></div>
+        ${addForm}
 
         <h2>Invite links</h2>
         <div class="card">${invites}
@@ -402,6 +462,32 @@
         await renderOrganizer(true);
         setStatus("plan-status", "Trip created. Now plan it with AI, then send each friend their invite link.");
       });
+      document.querySelectorAll("[data-remove]").forEach((b) => b.addEventListener("click", async () => {
+        const r = await post(`/api/organizer/items/${encodeURIComponent(b.dataset.remove)}/remove`, { pin: PIN });
+        await renderOrganizer(true);
+        setStatus("price-status", r.error || "Removed.");
+      }));
+      const kindSel = document.getElementById("add-kind");
+      if (kindSel) {
+        // A hotel is usually one total everyone shares; flights and meals are per person.
+        kindSel.addEventListener("change", () => { document.getElementById("add-type").value = kindSel.value === "hotel" ? "split" : "each"; });
+        document.getElementById("add-save").addEventListener("click", async () => {
+          const kind = kindSel.value;
+          const r = await post("/api/organizer/items", {
+            pin: PIN,
+            kind: kind === "hotel" ? "activity" : kind,
+            name: document.getElementById("add-name").value,
+            price: document.getElementById("add-price").value,
+            priceType: document.getElementById("add-type").value,
+            day: document.getElementById("add-day").value,
+            link: document.getElementById("add-link").value,
+          });
+          if (r.error) { setStatus("add-status", r.error); return; }
+          ["add-name", "add-price", "add-day", "add-link"].forEach((id) => { document.getElementById(id).value = ""; });
+          await renderOrganizer(true);
+          setStatus("add-status", "Added. Friends see it right away.");
+        });
+      }
       document.getElementById("plan").addEventListener("click", async () => {
         const request = document.getElementById("plan-request").value;
         setStatus("plan-status", "Planning… this takes a few seconds.");
