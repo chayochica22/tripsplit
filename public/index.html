@@ -35,6 +35,12 @@
     .late { color:var(--bad); font-weight:600; }
     .tag.yours { background:#e3f5ea; color:var(--ok); }
     .tag.est { background:var(--bg); color:var(--muted); }
+    .tag.ok { background:#e3f5ea; color:var(--ok); }
+    .tag.nr { background:#fbe9e7; color:var(--bad); }
+    .ack { display:flex; gap:10px; align-items:flex-start; background:#fbe9e7; color:var(--text); border-radius:10px; padding:10px 12px; margin:10px 0; font-size:.9rem; cursor:pointer; }
+    .ack input { width:auto; margin-top:3px; }
+    .nr-mark { color:var(--bad); font-size:.78rem; font-weight:600; margin-left:6px; }
+    .policy { width:auto; padding:4px 8px; font-size:.8rem; }
     h3 { font-size:.85rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin:18px 0 8px; }
     .meta { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:6px; font-size:.85rem; }
     .meta a { color:var(--accent); font-weight:600; }
@@ -119,14 +125,16 @@
       if (t.status === "paid") return `<span class="paid">✓ Paid</span>`;
       if (t.status === "held") return `<span class="held">Held · not charged yet</span>`;
       if (t.status === "released") return `<span class="released">Released · never charged</span>`;
-      if (t.status === "refunded") return `<span class="refunded">Refunded</span>`;
+      if (t.status === "refunded") return Number(t.kept) > 0
+        ? `<span class="refunded">Refunded ${money(t.refunded)} · ${money(t.kept)} non-refundable</span>`
+        : `<span class="refunded">Refunded</span>`;
       if (t.late) return `<span class="late">Late · owes ${money(t.share)}</span>`;
       return `<span class="owes">Owes ${money(t.share)}</span>`;
     }
     function proofLine(t) {
       if (t.status === "paid") return `PayPal ID ${esc(t.transactionId)} · ${esc(when(t.paidAt))}`;
       if (t.status === "held") return `Hold ID ${esc(t.authorizationId)}` + (t.holdExpires ? ` · expires ${esc(when(t.holdExpires))}` : "");
-      if (t.status === "refunded") return `Refund ID ${esc(t.refundId)}`;
+      if (t.status === "refunded") return t.refundId ? `Refund ID ${esc(t.refundId)}` : "Whole share was non-refundable once booked";
       return "";
     }
     function headerHtml(trip, subtitle) {
@@ -149,6 +157,18 @@
         </div>`;
     }
     // "Your price" = a real price the organizer found. "AI estimate" = a guess.
+    // Refund policy label. "AI guess" means check the real policy before booking.
+    function refundTag(x) {
+      const guess = x.refundSource !== "user" && x.refund !== "unknown" ? " (AI guess, check)" : "";
+      if (x.refund === "nonrefundable") return `<span class="tag nr">Non-refundable once booked${guess}</span>`;
+      if (x.refund === "refundable") return `<span class="tag ok">Refundable${guess}</span>`;
+      return `<span class="tag est">Refund policy: check</span>`;
+    }
+    function policySelect(x) {
+      const opt = (v, label) => `<option value="${v}" ${x.refund === v ? "selected" : ""}>${label}</option>`;
+      return `<select class="policy" data-policy="${esc(x.id)}" aria-label="Refund policy for ${esc(x.name || x.item)}">
+        ${opt("refundable", "Refundable")}${opt("nonrefundable", "Non-refundable once booked")}${opt("unknown", "Policy unknown")}</select>`;
+    }
     function sourceTag(x) {
       return x.source === "user" ? `<span class="tag yours">Your price</span>` : `<span class="tag est">AI estimate</span>`;
     }
@@ -157,7 +177,8 @@
     }
     function sharedCostsHtml(trip, canRemove) {
       const rows = trip.sharedCosts.map((c) => `
-        <tr><td>${esc(c.item)}<div class="meta">${sourceTag(c)} ${linkHtml(c)}
+        <tr><td>${esc(c.item)}<div class="meta">${sourceTag(c)} ${refundTag(c)} ${linkHtml(c)}
+          ${canRemove ? policySelect(c) : ""}
           ${canRemove ? `<button class="remove" data-remove="${esc(c.id)}">Remove</button>` : ""}</div></td>
         <td>${money(c.total)}</td></tr>`).join("");
       return `
@@ -218,7 +239,7 @@
           <div class="card">
             <div class="row"><span class="name">${esc(a.name)}</span><span class="price">${money(a.price)} each</span></div>
             <div class="note">${esc([a.day, a.note].filter(Boolean).join(" · "))}</div>
-            <div class="meta">${sourceTag(a)} ${linkHtml(a)}</div>
+            <div class="meta">${sourceTag(a)} ${refundTag(a)} ${linkHtml(a)}</div>
             ${re ? `<div class="chips"><span class="chip re">Price changed. Tap I'm in to accept ${money(a.price)}, or Skip.</span></div>` : ""}
             <div class="note">Going: ${who || "nobody yet"}</div>
             ${canChoose ? `<div class="btns">
@@ -232,8 +253,9 @@
       const breakdown = `
         <table class="breakdown">
           <tr><td>Your part of shared costs</td><td>${money(me.sharedPart)}</td></tr>
-          ${joined.map((a) => `<tr><td>${esc(a.name)}</td><td>${money(a.price)}</td></tr>`).join("")}
+          ${joined.map((a) => `<tr><td>${esc(a.name)}${a.refund === "nonrefundable" ? `<span class="nr-mark">non-refundable</span>` : ""}</td><td>${money(a.price)}</td></tr>`).join("")}
           <tr class="total"><td>Your share</td><td>${money(me.share)}</td></tr>
+          ${Number(me.nonRefundable) > 0 ? `<tr><td class="nr-mark" style="margin:0">Can't be refunded once booked</td><td class="nr-mark">${money(me.nonRefundable)}</td></tr>` : ""}
         </table>`;
       const proof = proofLine(me);
 
@@ -245,6 +267,8 @@
           ${proof ? `<div class="proof">${proof}</div>` : ""}
           ${me.reapprove.length ? `<div class="banner warn">A price changed. Confirm or skip it before paying.</div>` : ""}
           ${me.late ? `<div class="banner cancelled">The pay-by date (${esc(day(trip.deadline))}) has passed. The group is waiting on you to book.</div>` : ""}
+          ${canChoose && Number(me.nonRefundable) > 0 && !me.reapprove.length ? `<label class="ack"><input type="checkbox" id="ack-nr" />
+            <span>I understand ${money(me.nonRefundable)} of my share can't be refunded after the trip is booked. Before booking, nothing is charged.</span></label>` : ""}
           <div id="pay-box"></div>
           <div class="status" id="pay-status">${canChoose ? `Pay by ${esc(day(trip.deadline))}. Paying places a hold. You're only charged when everyone is in.` : ""}</div>
         </div>
@@ -257,7 +281,15 @@
         ${trailHtml(trip)}`;
 
       app.querySelectorAll("[data-join]").forEach((b) => b.addEventListener("click", async () => {
-        const r = await post(`/api/activities/${encodeURIComponent(b.dataset.join)}/join`, { token: TOKEN, join: b.dataset.val === "1" });
+        const join = b.dataset.val === "1";
+        const item = trip.activities.find((a) => a.id === b.dataset.join);
+        let acceptNonRefundable = false;
+        if (join && item && item.refund === "nonrefundable") {
+          // No surprises: ask before joining anything that can't be refunded.
+          if (!confirm(`${item.name} (${money(item.price)}) can't be refunded once it's booked. Still in?`)) return;
+          acceptNonRefundable = true;
+        }
+        const r = await post(`/api/activities/${encodeURIComponent(b.dataset.join)}/join`, { token: TOKEN, join, acceptNonRefundable });
         if (r.error) setStatus("pay-status", r.error);
         renderTraveler(true);
       }));
@@ -265,10 +297,15 @@
       if (canChoose && !me.reapprove.length && window.paypal) {
         paypal.Buttons({
           style: { layout: "horizontal", tagline: false, height: 40 },
-          onClick: () => { busy = true; },
+          onClick: (data, actions) => {
+            const box = document.getElementById("ack-nr");
+            if (box && !box.checked) { setStatus("pay-status", "Tick the box above to confirm the non-refundable part first."); return actions.reject(); }
+            busy = true;
+            return actions.resolve();
+          },
           onCancel: () => { busy = false; },
           createOrder: async () => {
-            const data = await post("/api/orders", { token: TOKEN });
+            const data = await post("/api/orders", { token: TOKEN, acceptNonRefundable: Boolean(document.getElementById("ack-nr")?.checked) });
             if (!data.id) { busy = false; setStatus("pay-status", data.error || "Order failed"); throw new Error(data.error || "Order failed"); }
             return data.id;
           },
@@ -360,7 +397,8 @@
             <div class="row"><span class="name">${esc(a.name)}</span><span class="price">${money(a.price)} each</span></div>
             <div class="note">${esc([a.day, a.note].filter(Boolean).join(" · "))}</div>
             <div class="meta">${sourceTag(a)} ${linkHtml(a)}
-              ${trip.status === "collecting" ? `<button class="remove" data-remove="${esc(a.id)}">Remove</button>` : ""}</div>
+              ${refundTag(a)}
+              ${trip.status === "collecting" ? `${policySelect(a)} <button class="remove" data-remove="${esc(a.id)}">Remove</button>` : ""}</div>
             <div class="chips">${chips}</div>
             ${trip.status === "collecting" ? `<div class="price-edit">
               <input type="number" min="0" step="0.01" value="${esc(a.price)}" id="price-${esc(a.id)}" aria-label="New price for ${esc(a.name)}" />
@@ -390,6 +428,12 @@
                 <option value="split">Total, split by everyone</option>
               </select></div>
           </div>
+          <div class="field"><label for="add-refund">Refund policy</label>
+            <select id="add-refund">
+              <option value="unknown">Not sure yet</option>
+              <option value="refundable">Refundable</option>
+              <option value="nonrefundable">Non-refundable once booked</option>
+            </select></div>
           <div class="two field">
             <div><label for="add-day">Date (optional)</label><input id="add-day" maxlength="20" placeholder="Dec 25" /></div>
             <div><label for="add-link">Link (optional)</label><input id="add-link" maxlength="300" placeholder="https://" /></div>
@@ -462,6 +506,11 @@
         await renderOrganizer(true);
         setStatus("plan-status", "Trip created. Now plan it with AI, then send each friend their invite link.");
       });
+      document.querySelectorAll("[data-policy]").forEach((sel) => sel.addEventListener("change", async () => {
+        const r = await post(`/api/organizer/items/${encodeURIComponent(sel.dataset.policy)}/refund`, { pin: PIN, refund: sel.value });
+        await renderOrganizer(true);
+        setStatus("price-status", r.error || (r.flagged && r.flagged.length ? `Refund policy saved. ${r.flagged.join(", ")} must re-approve.` : "Refund policy saved."));
+      }));
       document.querySelectorAll("[data-remove]").forEach((b) => b.addEventListener("click", async () => {
         const r = await post(`/api/organizer/items/${encodeURIComponent(b.dataset.remove)}/remove`, { pin: PIN });
         await renderOrganizer(true);
@@ -479,6 +528,7 @@
             name: document.getElementById("add-name").value,
             price: document.getElementById("add-price").value,
             priceType: document.getElementById("add-type").value,
+            refund: document.getElementById("add-refund").value,
             day: document.getElementById("add-day").value,
             link: document.getElementById("add-link").value,
           });
