@@ -17,8 +17,8 @@ Built for the PayPal AI Hackathon. Runs on the **PayPal sandbox**, so no real mo
 2. Optional: under **Plan the trip with AI**, describe a trip (you can paste a flight or hotel you found, with its price) and click **Plan with AI**.
 3. Under **Invite links**, click **Open as Sam**. Tap **I'm in** on a few activities and watch Sam's share update.
 4. Click the **PayPal** button and log in with this **sandbox buyer account** (fake money):
-   - Email: `JUDGE_SANDBOX_EMAIL`
-   - Password: `JUDGE_SANDBOX_PASSWORD`
+   - Email: `sb-1hzjq53614635@personal.example.com`
+   - Password: `1gG<6{t6`
 5. Repeat for each friend (the same PayPal login works for all of them). Each share shows **Held · not charged yet**.
 6. Back in the organizer view, click **Collect everyone & book**. Everyone is charged at the same time.
 7. Click **Cancel trip** to see payments refunded. Items marked *Non-refundable once booked* (like the train in the sample plan) are held back, exactly as each friend agreed before paying. Check the **Money trail** at the bottom.
